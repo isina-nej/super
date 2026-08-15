@@ -1,10 +1,19 @@
 from django.urls import path
 
-from apps.jobs.views import HealthView, JobAckView, JobDetailView, JobListCreateView
+from apps.jobs.views import (
+    HealthView,
+    JobAckView,
+    JobCancelView,
+    JobDetailView,
+    JobListCreateView,
+    ProbeView,
+)
 
 urlpatterns = [
     path("health/", HealthView.as_view(), name="health"),
     path("jobs/", JobListCreateView.as_view(), name="job-list-create"),
     path("jobs/<int:job_id>/", JobDetailView.as_view(), name="job-detail"),
     path("jobs/<int:job_id>/ack/", JobAckView.as_view(), name="job-ack"),
+    path("jobs/<int:job_id>/cancel/", JobCancelView.as_view(), name="job-cancel"),
+    path("probes/", ProbeView.as_view(), name="probe"),
 ]

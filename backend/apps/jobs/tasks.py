@@ -7,6 +7,7 @@ from celery import shared_task
 from django.conf import settings
 from django.utils import timezone
 
+from apps.downloads.services.base import CancelledDownload
 from apps.downloads.services.router import download_url
 from apps.jobs.models import DownloadJob
 
@@ -24,20 +25,31 @@ def process_download_job(self, job_id: int) -> dict:
     if job.status not in {DownloadJob.Status.PENDING, DownloadJob.Status.DOWNLOADING}:
         return {"ok": False, "error": f"invalid_status:{job.status}"}
 
-    job.status = DownloadJob.Status.DOWNLOADING
-    job.progress = 1
-    job.save(update_fields=["status", "progress", "updated_at"])
-
     dest_dir = Path(settings.MEDIA_ROOT) / "jobs" / str(job.id)
     dest_dir.mkdir(parents=True, exist_ok=True)
 
+    claimed = DownloadJob.objects.filter(
+        pk=job_id,
+        status=DownloadJob.Status.PENDING,
+    ).update(status=DownloadJob.Status.DOWNLOADING, progress=1)
+    if claimed:
+        job.status = DownloadJob.Status.DOWNLOADING
+        job.progress = 1
+    else:
+        job.refresh_from_db()
+        if job.status == DownloadJob.Status.CANCELED:
+            return {"ok": False, "error": "canceled"}
+        if job.status != DownloadJob.Status.DOWNLOADING:
+            return {"ok": False, "error": f"invalid_status:{job.status}"}
+
     def on_progress(percent: int) -> None:
-        # Avoid thrashing DB; update every ~5%
+        if DownloadJob.objects.filter(pk=job.id, status=DownloadJob.Status.CANCELED).exists():
+            raise CancelledDownload()
         if percent <= job.progress:
             return
         if percent - job.progress < 5 and percent < 95:
             return
-        DownloadJob.objects.filter(pk=job.id).update(
+        DownloadJob.objects.filter(pk=job.id).exclude(status=DownloadJob.Status.CANCELED).update(
             progress=min(percent, 99),
             updated_at=timezone.now(),
         )
@@ -52,10 +64,33 @@ def process_download_job(self, job_id: int) -> dict:
             max_bytes=settings.MAX_FILE_SIZE_BYTES,
             progress_callback=on_progress,
         )
+    except CancelledDownload:
+        import shutil
+
+        shutil.rmtree(dest_dir, ignore_errors=True)
+        DownloadJob.objects.filter(pk=job.id).update(
+            status=DownloadJob.Status.CANCELED,
+            error="دانلود توسط کاربر لغو شد.",
+            updated_at=timezone.now(),
+        )
+        return {"ok": False, "error": "canceled"}
     except Exception as exc:  # noqa: BLE001 — surface to job.error
+        job.refresh_from_db()
+        if job.status == DownloadJob.Status.CANCELED:
+            import shutil
+
+            shutil.rmtree(dest_dir, ignore_errors=True)
+            return {"ok": False, "error": "canceled"}
         logger.exception("Download failed for job %s", job_id)
         job.mark_failed(str(exc) or "دانلود ناموفق بود.")
         return {"ok": False, "error": str(exc)}
+
+    job.refresh_from_db()
+    if job.status == DownloadJob.Status.CANCELED:
+        import shutil
+
+        shutil.rmtree(dest_dir, ignore_errors=True)
+        return {"ok": False, "error": "canceled"}
 
     file_path = Path(result.file_path)
     if not file_path.exists():

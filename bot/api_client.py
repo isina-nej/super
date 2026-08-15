@@ -21,7 +21,7 @@ class DjangoApiClient:
         self.base_url = settings.api_base_url.rstrip("/")
         self.token = settings.internal_api_token
         self._client = httpx.AsyncClient(
-            timeout=60.0,
+            timeout=httpx.Timeout(120.0, connect=15.0),
             headers={"Authorization": f"Bearer {self.token}"},
         )
 
@@ -71,6 +71,21 @@ class DjangoApiClient:
 
     async def ack_job(self, job_id: int) -> dict[str, Any]:
         r = await self._client.post(f"{self.base_url}/jobs/{job_id}/ack/")
+        if r.status_code >= 400:
+            raise ApiError(_extract_detail(r), r.status_code)
+        return r.json()
+
+    async def cancel_job(self, job_id: int) -> dict[str, Any]:
+        r = await self._client.post(f"{self.base_url}/jobs/{job_id}/cancel/")
+        if r.status_code >= 400:
+            raise ApiError(_extract_detail(r), r.status_code)
+        return r.json()
+
+    async def probe(self, url: str, telegram_user_id: int = 0) -> dict[str, Any]:
+        r = await self._client.post(
+            f"{self.base_url}/probes/",
+            json={"url": url, "telegram_user_id": telegram_user_id},
+        )
         if r.status_code >= 400:
             raise ApiError(_extract_detail(r), r.status_code)
         return r.json()

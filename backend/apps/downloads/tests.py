@@ -70,3 +70,35 @@ class CookieConvertTests(SimpleTestCase):
         self.assertIn("session", out)
         self.assertNotIn("claude.ai", out)
         self.assertNotIn("nope", out)
+
+
+class CompactFormatTests(SimpleTestCase):
+    def test_dedupes_heights_and_adds_best_audio(self):
+        from apps.downloads.services.ytdlp import compact_format_choices
+
+        info = {
+            "formats": [
+                {
+                    "format_id": "18",
+                    "height": 360,
+                    "vcodec": "avc1",
+                    "acodec": "mp4a",
+                    "ext": "mp4",
+                },
+                {
+                    "format_id": "137",
+                    "height": 1080,
+                    "vcodec": "avc1",
+                    "acodec": "none",
+                    "ext": "mp4",
+                },
+                {"format_id": "sb0", "ext": "mhtml", "height": 180, "vcodec": "none", "acodec": "none"},
+            ]
+        }
+        rows = compact_format_choices(info)
+        ids = [r["id"] for r in rows]
+        self.assertIn("18", ids)
+        self.assertIn("137+bestaudio", ids)
+        self.assertIn("best", ids)
+        self.assertIn("audio", ids)
+        self.assertTrue(all(r["id"] != "sb0" for r in rows))

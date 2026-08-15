@@ -7,6 +7,10 @@ services:
       MYSQL_DATABASE: ${MYSQL_DATABASE:-download_bot}
       MYSQL_USER: ${MYSQL_USER:-bot}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:-botpass}
+    command:
+      - --innodb-buffer-pool-size=64M
+      - --performance-schema=OFF
+      - --max-connections=30
     volumes:
       - mysql_data:/var/lib/mysql
     ports:

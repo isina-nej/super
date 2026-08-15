@@ -23,6 +23,11 @@ class DownloadError(Exception):
     """Raised when a download cannot complete."""
 
 
+class CancelledDownload(DownloadError):
+    def __init__(self) -> None:
+        super().__init__("دانلود لغو شد.")
+
+
 class FileTooLargeError(DownloadError):
     def __init__(self, size: int, limit: int) -> None:
         self.size = size

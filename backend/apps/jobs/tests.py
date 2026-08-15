@@ -101,3 +101,38 @@ class JobsApiTests(TestCase):
         job.refresh_from_db()
         self.assertEqual(job.status, DownloadJob.Status.ACKED)
         cleanup_mock.assert_called_once()
+
+    @patch("apps.jobs.views.process_download_job.delay")
+    def test_cancel_pending_job(self, delay_mock):
+        delay_mock.return_value.id = "task-1"
+        r = self.client.post(
+            "/api/v1/jobs/",
+            {
+                "url": "https://cdn.example.com/file.mp4",
+                "telegram_user_id": 9,
+                "chat_id": 9,
+            },
+            format="json",
+            **self.auth,
+        )
+        job_id = r.json()["id"]
+        DownloadJob.objects.filter(pk=job_id).update(status=DownloadJob.Status.DOWNLOADING)
+        cancel = self.client.post(f"/api/v1/jobs/{job_id}/cancel/", **self.auth)
+        self.assertEqual(cancel.status_code, 200, cancel.content)
+        self.assertEqual(cancel.json()["status"], "canceled")
+
+    @patch("apps.jobs.views.list_ytdlp_formats")
+    def test_probe_ytdlp(self, probe_mock):
+        probe_mock.return_value = {
+            "title": "Demo",
+            "formats": [{"id": "18", "label": "360p", "height": 360, "ext": "mp4"}],
+        }
+        r = self.client.post(
+            "/api/v1/probes/",
+            {"url": "https://www.youtube.com/watch?v=abc", "telegram_user_id": 1},
+            format="json",
+            **self.auth,
+        )
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertEqual(r.json()["title"], "Demo")
+        self.assertEqual(r.json()["formats"][0]["id"], "18")

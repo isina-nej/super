@@ -12,6 +12,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+    User,
 )
 
 from bot.api_client import ApiError, DjangoApiClient
@@ -23,8 +24,8 @@ router = Router()
 
 URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 
-# Temporary URL wait for quality selection: telegram_user_id -> url
-_pending_urls: dict[int, str] = {}
+# (user_id, quality_message_id) -> {url, formats}
+_pending: dict[tuple[int, int], dict] = {}
 
 
 def _is_allowed(user_id: int) -> bool:
@@ -53,15 +54,37 @@ def _looks_like_direct(url: str) -> bool:
     )
 
 
-def quality_keyboard() -> InlineKeyboardMarkup:
+def _quality_keyboard(formats: list[dict], message_id: int) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for idx, fmt in enumerate(formats):
+        row.append(
+            InlineKeyboardButton(
+                text=str(fmt.get("label") or fmt.get("id") or "کیفیت"),
+                callback_data=f"q:{message_id}:{idx}",
+            )
+        )
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _cancel_keyboard(job_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(text="بهترین کیفیت", callback_data="fmt:best"),
-                InlineKeyboardButton(text="فقط صدا", callback_data="fmt:audio"),
-            ]
+            [InlineKeyboardButton(text="⏹ لغو دانلود", callback_data=f"cancel:{job_id}")]
         ]
     )
+
+
+def _default_formats() -> list[dict]:
+    return [
+        {"id": "best", "label": "بهترین کیفیت"},
+        {"id": "audio", "label": "فقط صدا (MP3)"},
+    ]
 
 
 @router.message(CommandStart())
@@ -72,8 +95,9 @@ async def cmd_start(message: Message) -> None:
     await message.answer(
         "سلام! 👋\n\n"
         "لینک ویدیو یا فایل را بفرستید تا دانلود کنم.\n"
-        "پشتیبانی از یوتیوب، اینستاگرام، تیک‌تاک و لینک مستقیم فایل.\n\n"
-        "سقف حجم: ۲ گیگابایت (Local Bot API)\n"
+        "چند لینک را پشت‌سرهم بفرستید تا همزمان دانلود شوند.\n"
+        "کیفیت را از دکمه‌ها انتخاب کنید و در صورت نیاز دانلود را لغو کنید.\n\n"
+        "سقف حجم: ۲ گیگابایت\n"
         "/help برای راهنما"
     )
 
@@ -82,10 +106,9 @@ async def cmd_start(message: Message) -> None:
 async def cmd_help(message: Message) -> None:
     await message.answer(
         "📖 راهنما\n\n"
-        "۱. لینک را ارسال کنید\n"
-        "۲. برای لینک‌های مدیا، کیفیت را انتخاب کنید\n"
-        "۳. صبر کنید تا فایل آماده و ارسال شود\n\n"
-        "دستورات:\n"
+        "• لینک بفرستید → کیفیت را انتخاب کنید\n"
+        "• چند لینک = چند دانلود همزمان\n"
+        "• دکمه «لغو دانلود» جاب را متوقف می‌کند\n\n"
         "/start — شروع\n"
         "/help — همین پیام"
     )
@@ -105,81 +128,133 @@ async def on_text(message: Message, api: DjangoApiClient) -> None:
         return
 
     url = match.group(0).rstrip(").,]}>\"'")
-    user_id = message.from_user.id
+    user = message.from_user
 
     if _looks_like_direct(url):
-        await _start_job(
-            message,
-            api,
-            url=url,
-            preferred_format="best",
+        asyncio.create_task(
+            _run_job(message, api, url=url, preferred_format="best", user=user)
         )
         return
 
-    _pending_urls[user_id] = url
-    await message.answer(
-        "لینک دریافت شد. کیفیت را انتخاب کنید:",
-        reply_markup=quality_keyboard(),
-    )
+    wait = await message.answer("🔎 در حال خواندن کیفیت‌های موجود…")
+    formats = _default_formats()
+    title = ""
+    try:
+        probed = await api.probe(url, telegram_user_id=user.id)
+        formats = probed.get("formats") or formats
+        title = probed.get("title") or ""
+    except ApiError as exc:
+        logger.warning("probe failed: %s", exc)
+        await wait.edit_text(
+            f"نتوانستم لیست کیفیت را کامل بخوانم ({exc}).\nکیفیت کلی را انتخاب کنید:"
+        )
+    else:
+        head = f"{title}\n\n" if title else ""
+        await wait.edit_text(f"{head}کیفیت را انتخاب کنید:")
+
+    _pending[(user.id, wait.message_id)] = {"url": url, "formats": formats}
+    try:
+        await wait.edit_reply_markup(reply_markup=_quality_keyboard(formats, wait.message_id))
+    except Exception:  # noqa: BLE001
+        logger.exception("failed to attach quality keyboard")
 
 
-@router.callback_query(F.data.startswith("fmt:"))
-async def on_format(callback: CallbackQuery, api: DjangoApiClient) -> None:
-    if not callback.from_user or not callback.message:
+@router.callback_query(F.data.startswith("q:"))
+async def on_quality(callback: CallbackQuery, api: DjangoApiClient) -> None:
+    if not callback.from_user or not callback.message or not callback.data:
         return
     if not _is_allowed(callback.from_user.id):
         await callback.answer("دسترسی مجاز نیست", show_alert=True)
         return
 
-    fmt = callback.data.split(":", 1)[1]
-    if fmt not in {"best", "audio"}:
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer("نامعتبر")
+        return
+    try:
+        msg_id = int(parts[1])
+        idx = int(parts[2])
+    except ValueError:
         await callback.answer("نامعتبر")
         return
 
-    url = _pending_urls.pop(callback.from_user.id, None)
-    if not url:
-        await callback.answer("لینک منقضی شده؛ دوباره بفرستید.", show_alert=True)
+    pending = _pending.pop((callback.from_user.id, msg_id), None)
+    if not pending:
+        await callback.answer("این انتخاب منقضی شده؛ لینک را دوباره بفرستید.", show_alert=True)
         return
 
-    await callback.answer()
+    formats = pending.get("formats") or _default_formats()
+    if idx < 0 or idx >= len(formats):
+        await callback.answer("کیفیت نامعتبر")
+        return
+    fmt_id = str(formats[idx].get("id") or "best")
+    label = str(formats[idx].get("label") or fmt_id)
+
+    await callback.answer(label)
     try:
         await callback.message.edit_reply_markup(reply_markup=None)
     except Exception:  # noqa: BLE001
         pass
 
-    await _start_job(
-        callback.message,
-        api,
-        url=url,
-        preferred_format=fmt,
-        user=callback.from_user,
+    asyncio.create_task(
+        _run_job(
+            callback.message,
+            api,
+            url=pending["url"],
+            preferred_format=fmt_id,
+            user=callback.from_user,
+            quality_label=label,
+        )
     )
 
 
-async def _start_job(
+@router.callback_query(F.data.startswith("cancel:"))
+async def on_cancel(callback: CallbackQuery, api: DjangoApiClient) -> None:
+    if not callback.from_user or not callback.data:
+        return
+    if not _is_allowed(callback.from_user.id):
+        await callback.answer("دسترسی مجاز نیست", show_alert=True)
+        return
+    try:
+        job_id = int(callback.data.split(":", 1)[1])
+    except (IndexError, ValueError):
+        await callback.answer("نامعتبر")
+        return
+    try:
+        await api.cancel_job(job_id)
+    except ApiError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer("لغو شد")
+    if callback.message:
+        try:
+            await callback.message.edit_text(f"⏹ دانلود #{job_id} لغو شد.")
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def _run_job(
     message: Message,
     api: DjangoApiClient,
     *,
     url: str,
     preferred_format: str,
-    user=None,
+    user: User,
+    quality_label: str = "",
 ) -> None:
-    from_user = user or message.from_user
-    if not from_user:
-        return
-
-    status_msg = await message.answer("⏳ در حال ایجاد جاب دانلود…")
+    extra = f" ({quality_label})" if quality_label else ""
+    status_msg = await message.answer(f"⏳ در حال ایجاد جاب دانلود{extra}…")
 
     try:
         job = await api.create_job(
             url=url,
-            telegram_user_id=from_user.id,
+            telegram_user_id=user.id,
             chat_id=message.chat.id,
             preferred_format=preferred_format,
-            username=from_user.username or "",
-            first_name=from_user.first_name or "",
-            last_name=from_user.last_name or "",
-            language_code=from_user.language_code or "",
+            username=user.username or "",
+            first_name=user.first_name or "",
+            last_name=user.last_name or "",
+            language_code=user.language_code or "",
         )
     except ApiError as exc:
         await status_msg.edit_text(f"❌ خطا: {exc}")
@@ -190,7 +265,10 @@ async def _start_job(
         return
 
     job_id = job["id"]
-    await status_msg.edit_text(f"📥 دانلود شروع شد (#{job_id})…")
+    await status_msg.edit_text(
+        f"📥 دانلود شروع شد (#{job_id}){extra}…",
+        reply_markup=_cancel_keyboard(job_id),
+    )
 
     settings = get_settings()
     elapsed = 0.0
@@ -208,9 +286,15 @@ async def _start_job(
         status = job.get("status")
         progress = int(job.get("progress") or 0)
 
+        if status == "canceled":
+            await status_msg.edit_text(f"⏹ دانلود #{job_id} لغو شد.")
+            return
         if status == "downloading" and progress != last_progress:
             last_progress = progress
-            await status_msg.edit_text(f"📥 در حال دانلود… {progress}% (#{job_id})")
+            await status_msg.edit_text(
+                f"📥 در حال دانلود… {progress}% (#{job_id}){extra}",
+                reply_markup=_cancel_keyboard(job_id),
+            )
         elif status == "ready":
             file_path = job.get("file_path") or ""
             await status_msg.edit_text("📤 در حال ارسال فایل…")

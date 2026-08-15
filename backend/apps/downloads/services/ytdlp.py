@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
 from apps.downloads.services.base import (
+    CancelledDownload,
     DownloadError,
     DownloadResult,
     FileTooLargeError,
@@ -65,6 +66,111 @@ def _friendly_ytdlp_error(exc: BaseException) -> str:
     return f"خطا در دانلود: {text.strip()[:400]}"
 
 
+def _is_youtube(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return "youtube.com" in host or host.endswith("youtu.be")
+
+
+def _base_ydl_opts(url: str) -> dict:
+    opts: dict = {
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "retries": 5,
+        "fragment_retries": 5,
+        "socket_timeout": 30,
+        "impersonate": _impersonate_target(),
+        "http_headers": {
+            "User-Agent": _BROWSER_UA,
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": url,
+        },
+        "extractor_args": {
+            "generic": {"impersonate": ["chrome"]},
+            "youtube": {"player_client": ["android", "web"]},
+        },
+        "js_runtimes": {"node": {}},
+    }
+    cookiefile = resolve_cookiefile()
+    if cookiefile and not _is_youtube(url):
+        opts["cookiefile"] = cookiefile
+    elif not _is_youtube(url):
+        opts["http_headers"]["Cookie"] = "accessAgeDisclaimerPH=2"
+    proxy = os.getenv("YTDLP_PROXY", "").strip()
+    if proxy:
+        opts["proxy"] = proxy
+    return opts
+
+
+def compact_format_choices(info: dict) -> list[dict]:
+    """Collapse yt-dlp formats into unique height / audio buttons."""
+    by_height: dict[int, dict] = {}
+    for fmt in info.get("formats") or []:
+        if (fmt.get("ext") or "") == "mhtml":
+            continue
+        fid = str(fmt.get("format_id") or "")
+        if not fid:
+            continue
+        height = int(fmt.get("height") or 0)
+        vcodec = fmt.get("vcodec") or "none"
+        acodec = fmt.get("acodec") or "none"
+        has_v = vcodec != "none"
+        has_a = acodec != "none"
+        if not has_v or height < 144:
+            continue
+        if has_a:
+            fmt_id = fid
+        else:
+            fmt_id = f"{fid}+bestaudio"
+        prev = by_height.get(height)
+        if prev is None or (has_a and "+" in str(prev.get("id") or "")):
+            note = (fmt.get("format_note") or "").strip()
+            extra = f" {note}" if note and note not in {f"{height}p", str(height)} else ""
+            by_height[height] = {
+                "id": fmt_id[:60],
+                "label": f"{height}p{extra}"[:32],
+                "height": height,
+                "ext": fmt.get("ext") or "mp4",
+            }
+    rows = [by_height[h] for h in sorted(by_height, reverse=True)]
+    # Keep a reasonable Telegram keyboard
+    rows = rows[:8]
+    rows.append({"id": "best", "label": "بهترین کیفیت", "height": 0, "ext": "mp4"})
+    rows.append({"id": "audio", "label": "فقط صدا (MP3)", "height": 0, "ext": "mp3"})
+    return rows
+
+
+def list_ytdlp_formats(url: str) -> dict:
+    try:
+        import yt_dlp
+    except ImportError as exc:
+        raise DownloadError("yt-dlp نصب نشده است.") from exc
+
+    opts = _base_ydl_opts(url)
+    opts["skip_download"] = True
+    last_exc: BaseException | None = None
+    urls_to_try = [url]
+    fallback = _pornhub_fallback_url(url)
+    if fallback:
+        urls_to_try.append(fallback)
+    info = None
+    for attempt_url in urls_to_try:
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(attempt_url, download=False)
+            last_exc = None
+            break
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            logger.warning("list formats failed for %s: %s", attempt_url, exc)
+    if last_exc is not None or info is None:
+        raise DownloadError(_friendly_ytdlp_error(last_exc or DownloadError("اطلاعات ویدیو دریافت نشد.")))
+    return {
+        "title": str(info.get("title") or "")[:512],
+        "formats": compact_format_choices(info),
+    }
+
+
 def download_ytdlp(
     url: str,
     dest_dir: Path,
@@ -81,6 +187,7 @@ def download_ytdlp(
     dest_dir.mkdir(parents=True, exist_ok=True)
     outtmpl = str(dest_dir / "%(title).200B [%(id)s].%(ext)s")
 
+    postprocessors: list[dict] = []
     if preferred_format == "audio":
         format_selector = "bestaudio/best"
         postprocessors = [
@@ -90,9 +197,10 @@ def download_ytdlp(
                 "preferredquality": "192",
             }
         ]
-    else:
+    elif preferred_format in {"best", ""}:
         format_selector = "b/bv*+ba/best"
-        postprocessors = []
+    else:
+        format_selector = f"{preferred_format}/b/best"
 
     def _hook(d: dict) -> None:
         if not progress_callback:
@@ -104,54 +212,21 @@ def download_ytdlp(
                 raise FileTooLargeError(int(total), max_bytes)
             if total:
                 progress_callback(min(99, int(downloaded * 100 / total)))
+            else:
+                progress_callback(1)
         elif d.get("status") == "finished":
             progress_callback(99)
 
-    ydl_opts = {
-        "outtmpl": outtmpl,
-        "format": format_selector,
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "progress_hooks": [_hook],
-        "postprocessors": postprocessors,
-        "restrictfilenames": True,
-        "retries": 5,
-        "fragment_retries": 5,
-        "socket_timeout": 30,
-        "impersonate": _impersonate_target(),
-        "http_headers": {
-            "User-Agent": _BROWSER_UA,
-            "Accept-Language": "en-US,en;q=0.9",
-            "Referer": url,
-        },
-        # PornHub age gate; ignored by other extractors
-        "extractor_args": {
-            "generic": {"impersonate": ["chrome"]},
-            "youtube": {
-                "player_client": ["android", "web"],
-            },
-        },
-        "js_runtimes": {"node": {}},
-    }
-
-    cookiefile = resolve_cookiefile()
-    host = (urlparse(url).hostname or "").lower()
-    youtube_host = "youtube.com" in host or host.endswith("youtu.be")
-    if cookiefile and not youtube_host:
-        ydl_opts["cookiefile"] = cookiefile
-        logger.info("yt-dlp using cookiefile")
-    elif youtube_host:
-        # Logged-in YouTube cookies often enable SABR-only streams with no URLs.
-        logger.info("skipping cookies for YouTube to avoid SABR-only formats")
-    else:
-        ydl_opts["http_headers"]["Cookie"] = "accessAgeDisclaimerPH=2"
-
-    proxy = os.getenv("YTDLP_PROXY", "").strip()
-    if proxy:
-        ydl_opts["proxy"] = proxy
-        logger.info("yt-dlp using proxy")
-
+    ydl_opts = _base_ydl_opts(url)
+    ydl_opts.update(
+        {
+            "outtmpl": outtmpl,
+            "format": format_selector,
+            "progress_hooks": [_hook],
+            "postprocessors": postprocessors,
+            "restrictfilenames": True,
+        }
+    )
     urls_to_try = [url]
     fallback = _pornhub_fallback_url(url)
     if fallback:
@@ -179,6 +254,8 @@ def download_ytdlp(
                     break
             except FileTooLargeError:
                 raise
+            except CancelledDownload:
+                raise
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
                 logger.warning("yt-dlp failed for %s: %s", attempt_url, exc)
@@ -189,6 +266,8 @@ def download_ytdlp(
             raise DownloadError("اطلاعات ویدیو دریافت نشد.")
 
     except FileTooLargeError:
+        raise
+    except CancelledDownload:
         raise
     except Exception as exc:  # noqa: BLE001
         logger.exception("yt-dlp failed for %s", url)

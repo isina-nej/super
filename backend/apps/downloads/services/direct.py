@@ -9,6 +9,7 @@ from urllib.parse import unquote, urlparse
 import httpx
 
 from apps.downloads.services.base import (
+    CancelledDownload,
     DownloadError,
     DownloadResult,
     FileTooLargeError,
@@ -78,10 +79,11 @@ def download_direct(
                     dest.unlink(missing_ok=True)
                     raise FileTooLargeError(written, max_bytes)
                 fh.write(chunk)
-                if progress_callback and content_length and content_length.isdigit():
-                    total = int(content_length)
-                    if total > 0:
-                        progress_callback(min(99, int(written * 100 / total)))
+                if progress_callback:
+                    if content_length and str(content_length).isdigit() and int(content_length) > 0:
+                        progress_callback(min(99, int(written * 100 / int(content_length))))
+                    else:
+                        progress_callback(1)
 
     if progress_callback:
         progress_callback(100)

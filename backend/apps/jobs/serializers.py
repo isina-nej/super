@@ -64,12 +64,13 @@ class CreateJobSerializer(serializers.Serializer):
     url = serializers.URLField(max_length=2048)
     telegram_user_id = serializers.IntegerField()
     chat_id = serializers.IntegerField()
-    preferred_format = serializers.ChoiceField(
-        choices=DownloadJob.PreferredFormat.choices,
-        default=DownloadJob.PreferredFormat.BEST,
-        required=False,
-    )
+    preferred_format = serializers.CharField(max_length=64, required=False, default="best")
     username = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
     first_name = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
     last_name = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
     language_code = serializers.CharField(max_length=16, required=False, allow_blank=True, default="")
+
+
+class ProbeSerializer(serializers.Serializer):
+    url = serializers.URLField(max_length=2048)
+    telegram_user_id = serializers.IntegerField(required=False, default=0)

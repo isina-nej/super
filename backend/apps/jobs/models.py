@@ -12,6 +12,7 @@ class DownloadJob(models.Model):
         FAILED = "failed", "Failed"
         EXPIRED = "expired", "Expired"
         ACKED = "acked", "Acked"
+        CANCELED = "canceled", "Canceled"
 
     class SourceType(models.TextChoices):
         YTDLP = "ytdlp", "yt-dlp"
@@ -41,10 +42,10 @@ class DownloadJob(models.Model):
         default="",
     )
     preferred_format = models.CharField(
-        max_length=16,
-        choices=PreferredFormat.choices,
+        max_length=64,
         default=PreferredFormat.BEST,
     )
+    celery_task_id = models.CharField(max_length=255, blank=True, default="")
     file_path = models.CharField(max_length=1024, blank=True, default="")
     file_size = models.BigIntegerField(null=True, blank=True)
     mime_type = models.CharField(max_length=255, blank=True, default="")
