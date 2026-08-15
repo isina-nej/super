@@ -5,7 +5,8 @@ import logging
 import re
 from urllib.parse import urlparse
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     CallbackQuery,
@@ -33,6 +34,61 @@ def _is_allowed(user_id: int) -> bool:
     if not allowed:
         return True
     return user_id in allowed
+
+
+def _required_channel() -> str:
+    return (get_settings().required_channel or "").strip()
+
+
+def _join_keyboard() -> InlineKeyboardMarkup:
+    settings = get_settings()
+    url = settings.required_channel_url or f"https://t.me/{_required_channel().lstrip('@')}"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="𓆩  عضویت در کانال  𓆪", url=url)],
+            [InlineKeyboardButton(text="✅ تایید عضویت", callback_data="join:check")],
+        ]
+    )
+
+
+async def _is_channel_member(bot: Bot, user_id: int) -> bool:
+    chat = _required_channel()
+    if not chat:
+        return True
+    try:
+        member = await bot.get_chat_member(chat, user_id)
+    except TelegramBadRequest as exc:
+        logger.warning("channel membership check failed: %s", exc)
+        return False
+    except Exception:  # noqa: BLE001
+        logger.exception("channel membership check failed")
+        return False
+    return member.status in {"creator", "administrator", "member", "restricted"}
+
+
+async def _require_join(target: Message | CallbackQuery) -> bool:
+    user = target.from_user
+    bot = target.bot
+    if not user or bot is None:
+        return False
+    if await _is_channel_member(bot, user.id):
+        return True
+    text = (
+        "برای استفاده از ربات باید عضو کانال باشید.\n\n"
+        "۱. دکمه شیشه‌ای «عضویت در کانال» را بزنید\n"
+        "۲. بعد از عضویت، «تایید عضویت» را بزنید"
+    )
+    markup = _join_keyboard()
+    if isinstance(target, CallbackQuery):
+        await target.answer("اول در کانال عضو شوید", show_alert=True)
+        if target.message:
+            try:
+                await target.message.answer(text, reply_markup=markup)
+            except Exception:  # noqa: BLE001
+                pass
+    else:
+        await target.answer(text, reply_markup=markup)
+    return False
 
 
 def _looks_like_direct(url: str) -> bool:
@@ -92,6 +148,8 @@ async def cmd_start(message: Message) -> None:
     if not message.from_user or not _is_allowed(message.from_user.id):
         await message.answer("⛔ دسترسی شما مجاز نیست.")
         return
+    if not await _require_join(message):
+        return
     await message.answer(
         "سلام! 👋\n\n"
         "لینک ویدیو یا فایل را بفرستید تا دانلود کنم.\n"
@@ -104,6 +162,11 @@ async def cmd_start(message: Message) -> None:
 
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
+    if not message.from_user or not _is_allowed(message.from_user.id):
+        await message.answer("⛔ دسترسی شما مجاز نیست.")
+        return
+    if not await _require_join(message):
+        return
     await message.answer(
         "📖 راهنما\n\n"
         "• لینک بفرستید → کیفیت را انتخاب کنید\n"
@@ -120,6 +183,8 @@ async def on_text(message: Message, api: DjangoApiClient) -> None:
         return
     if not _is_allowed(message.from_user.id):
         await message.answer("⛔ دسترسی شما مجاز نیست.")
+        return
+    if not await _require_join(message):
         return
 
     match = URL_RE.search(message.text)
@@ -159,12 +224,43 @@ async def on_text(message: Message, api: DjangoApiClient) -> None:
         logger.exception("failed to attach quality keyboard")
 
 
+@router.callback_query(F.data == "join:check")
+async def on_join_check(callback: CallbackQuery) -> None:
+    if not callback.from_user:
+        return
+    if not _is_allowed(callback.from_user.id):
+        await callback.answer("دسترسی مجاز نیست", show_alert=True)
+        return
+    bot = callback.bot
+    if bot is None:
+        await callback.answer("ربات در دسترس نیست", show_alert=True)
+        return
+    if await _is_channel_member(bot, callback.from_user.id):
+        await callback.answer("عضویت تایید شد ✅", show_alert=True)
+        if callback.message:
+            try:
+                await callback.message.edit_text(
+                    "عضویت شما تایید شد.\nحالا لینک ویدیو یا فایل را بفرستید."
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        return
+    await callback.answer("هنوز عضو کانال نیستید", show_alert=True)
+    if callback.message:
+        try:
+            await callback.message.edit_reply_markup(reply_markup=_join_keyboard())
+        except Exception:  # noqa: BLE001
+            pass
+
+
 @router.callback_query(F.data.startswith("q:"))
 async def on_quality(callback: CallbackQuery, api: DjangoApiClient) -> None:
     if not callback.from_user or not callback.message or not callback.data:
         return
     if not _is_allowed(callback.from_user.id):
         await callback.answer("دسترسی مجاز نیست", show_alert=True)
+        return
+    if not await _require_join(callback):
         return
 
     parts = callback.data.split(":")
@@ -214,6 +310,8 @@ async def on_cancel(callback: CallbackQuery, api: DjangoApiClient) -> None:
         return
     if not _is_allowed(callback.from_user.id):
         await callback.answer("دسترسی مجاز نیست", show_alert=True)
+        return
+    if not await _require_join(callback):
         return
     try:
         job_id = int(callback.data.split(":", 1)[1])

@@ -117,6 +117,8 @@ services:
       API_BASE_URL: http://api:8000/api/v1
       TELEGRAM_BOT_API_URL: http://telegram-bot-api:8081
       MEDIA_ROOT: /media
+      REQUIRED_CHANNEL: ${REQUIRED_CHANNEL:-@CoffeeMan_nej}
+      REQUIRED_CHANNEL_URL: ${REQUIRED_CHANNEL_URL:-https://t.me/CoffeeMan_nej}
     volumes:
       - media_data:/media
     depends_on:

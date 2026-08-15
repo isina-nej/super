@@ -18,6 +18,8 @@ class BotSettings(BaseSettings):
     api_base_url: str = "http://api:8000/api/v1"
     internal_api_token: str = "change-me-internal-token"
     allowed_telegram_ids: str = ""
+    required_channel: str = "@CoffeeMan_nej"
+    required_channel_url: str = "https://t.me/CoffeeMan_nej"
     poll_interval_seconds: float = 2.0
     poll_timeout_seconds: float = 1800.0
     media_root: str = "/media"
@@ -49,6 +51,10 @@ def get_settings() -> BotSettings:
         api_base_url=os.getenv("API_BASE_URL", "http://api:8000/api/v1"),
         internal_api_token=os.getenv("INTERNAL_API_TOKEN", "change-me-internal-token"),
         allowed_telegram_ids=os.getenv("ALLOWED_TELEGRAM_IDS", ""),
+        required_channel=os.getenv("REQUIRED_CHANNEL", "@CoffeeMan_nej"),
+        required_channel_url=os.getenv(
+            "REQUIRED_CHANNEL_URL", "https://t.me/CoffeeMan_nej"
+        ),
         poll_interval_seconds=float(os.getenv("POLL_INTERVAL_SECONDS", "2")),
         poll_timeout_seconds=float(os.getenv("POLL_TIMEOUT_SECONDS", "1800")),
         media_root=os.getenv("MEDIA_ROOT", "/media"),
