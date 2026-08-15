@@ -4,6 +4,7 @@ import logging
 import mimetypes
 import os
 import re
+import shutil
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
@@ -71,6 +72,95 @@ def _is_youtube(url: str) -> bool:
     return "youtube.com" in host or host.endswith("youtu.be")
 
 
+def _is_pornhub(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return "pornhub.com" in host or host.endswith("pornhub.org")
+
+
+def _is_twitter(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return host in {"x.com", "www.x.com", "mobile.x.com"} or host.endswith("twitter.com")
+
+
+def _normalize_media_url(url: str) -> str:
+    """Strip /video/1 suffixes so the Twitter extractor sees a status URL."""
+    parsed = urlparse(url.strip())
+    host = (parsed.hostname or "").lower()
+    path = parsed.path or ""
+    if _is_twitter(url):
+        match = re.match(r"(/.*/status/\d+)", path)
+        if match:
+            path = match.group(1)
+        return urlunparse(("https", "x.com", path, "", "", ""))
+    return url
+
+
+def _urls_to_try(url: str) -> list[str]:
+    ordered = [url, _normalize_media_url(url)]
+    fallback = _pornhub_fallback_url(url)
+    if fallback:
+        ordered.append(fallback)
+    seen: list[str] = []
+    for item in ordered:
+        if item and item not in seen:
+            seen.append(item)
+    return seen
+
+
+def _int_env(name: str, default: int, *, lo: int, hi: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        value = default
+    return max(lo, min(hi, value))
+
+
+def format_selector_for(url: str, preferred_format: str) -> str:
+    if preferred_format == "audio":
+        return "bestaudio/best"
+    if preferred_format in {"best", ""}:
+        if _is_pornhub(url) or _is_twitter(url):
+            # Progressive HTTP can use multi-connection; HLS remains the fallback.
+            return "best[ext=mp4][protocol^=http]/b[protocol^=http]/b/bv*+ba/best"
+        return "b/bv*+ba/best"
+    return f"{preferred_format}/b/best"
+
+
+def _download_speed_opts() -> dict:
+    """Parallel HLS fragments + aria2c multi-connection for progressive HTTP."""
+    connections = str(_int_env("YTDLP_ARIA2_CONNECTIONS", 16, lo=2, hi=32))
+    opts: dict = {
+        "concurrent_fragment_downloads": _int_env("YTDLP_CONCURRENT_FRAGMENTS", 16, lo=1, hi=32),
+        "retries": 10,
+        "fragment_retries": 10,
+        "buffersize": 1024 * 1024,
+        "http_chunk_size": 10 * 1024 * 1024,
+    }
+    if shutil.which("aria2c"):
+        opts["external_downloader"] = {"http": "aria2c", "https": "aria2c"}
+        opts["external_downloader_args"] = {
+            "aria2c": [
+                "-x",
+                connections,
+                "-s",
+                connections,
+                "-k",
+                "1M",
+                "--file-allocation=none",
+                "--summary-interval=0",
+                "--min-split-size=1M",
+                "--max-tries=8",
+                "--retry-wait=1",
+                "--allow-overwrite=true",
+                "--auto-file-renaming=false",
+            ]
+        }
+        logger.info("yt-dlp using aria2c with %s connections", connections)
+    else:
+        logger.info("aria2c not found; using native downloader with concurrent fragments")
+    return opts
+
+
 def _base_ydl_opts(url: str) -> dict:
     opts: dict = {
         "noplaylist": True,
@@ -102,9 +192,46 @@ def _base_ydl_opts(url: str) -> dict:
     return opts
 
 
+def _has_video_track(fmt: dict) -> bool:
+    vcodec = fmt.get("vcodec")
+    if vcodec in (None, ""):
+        return bool(fmt.get("height") or fmt.get("width"))
+    return vcodec != "none"
+
+
+def _has_audio_track(fmt: dict) -> bool:
+    acodec = fmt.get("acodec")
+    if acodec in (None, ""):
+        proto = str(fmt.get("protocol") or "")
+        return proto.startswith("http") and "m3u8" not in proto
+    return acodec != "none"
+
+
+def _format_rank(fmt: dict, *, has_audio: bool, fmt_id: str) -> tuple[int, int, int]:
+    proto = str(fmt.get("protocol") or "")
+    progressive = int(proto.startswith("http") and "m3u8" not in proto)
+    combined = int(has_audio and "+" not in fmt_id)
+    size = int(fmt.get("filesize") or fmt.get("filesize_approx") or 0)
+    return (progressive, combined, size)
+
+
+def _size_label(fmt: dict) -> str:
+    size = fmt.get("filesize") or fmt.get("filesize_approx")
+    try:
+        size_n = int(size)
+    except (TypeError, ValueError):
+        return ""
+    if size_n <= 0:
+        return ""
+    if size_n >= 1024**3:
+        return f" {size_n / 1024**3:.1f}GB"
+    return f" {max(1, size_n // (1024 * 1024))}MB"
+
+
 def compact_format_choices(info: dict) -> list[dict]:
     """Collapse yt-dlp formats into unique height / audio buttons."""
     by_height: dict[int, dict] = {}
+    ranks: dict[int, tuple[int, int, int]] = {}
     for fmt in info.get("formats") or []:
         if (fmt.get("ext") or "") == "mhtml":
             continue
@@ -112,26 +239,24 @@ def compact_format_choices(info: dict) -> list[dict]:
         if not fid:
             continue
         height = int(fmt.get("height") or 0)
-        vcodec = fmt.get("vcodec") or "none"
-        acodec = fmt.get("acodec") or "none"
-        has_v = vcodec != "none"
-        has_a = acodec != "none"
+        has_v = _has_video_track(fmt)
+        has_a = _has_audio_track(fmt)
         if not has_v or height < 144:
             continue
-        if has_a:
-            fmt_id = fid
-        else:
-            fmt_id = f"{fid}+bestaudio"
+        fmt_id = fid if has_a else f"{fid}+bestaudio"
+        rank = _format_rank(fmt, has_audio=has_a, fmt_id=fmt_id)
         prev = by_height.get(height)
-        if prev is None or (has_a and "+" in str(prev.get("id") or "")):
-            note = (fmt.get("format_note") or "").strip()
-            extra = f" {note}" if note and note not in {f"{height}p", str(height)} else ""
-            by_height[height] = {
-                "id": fmt_id[:60],
-                "label": f"{height}p{extra}"[:32],
-                "height": height,
-                "ext": fmt.get("ext") or "mp4",
-            }
+        if prev is not None and ranks.get(height, (0, 0, 0)) >= rank:
+            continue
+        note = (fmt.get("format_note") or "").strip()
+        extra = f" {note}" if note and note not in {f"{height}p", str(height)} else ""
+        by_height[height] = {
+            "id": fmt_id[:60],
+            "label": f"{height}p{extra}{_size_label(fmt)}"[:32],
+            "height": height,
+            "ext": fmt.get("ext") or "mp4",
+        }
+        ranks[height] = rank
     rows = [by_height[h] for h in sorted(by_height, reverse=True)]
     # Keep a reasonable Telegram keyboard
     rows = rows[:8]
@@ -146,13 +271,11 @@ def list_ytdlp_formats(url: str) -> dict:
     except ImportError as exc:
         raise DownloadError("yt-dlp نصب نشده است.") from exc
 
+    url = _normalize_media_url(url)
     opts = _base_ydl_opts(url)
     opts["skip_download"] = True
     last_exc: BaseException | None = None
-    urls_to_try = [url]
-    fallback = _pornhub_fallback_url(url)
-    if fallback:
-        urls_to_try.append(fallback)
+    urls_to_try = _urls_to_try(url)
     info = None
     for attempt_url in urls_to_try:
         try:
@@ -184,12 +307,13 @@ def download_ytdlp(
     except ImportError as exc:
         raise DownloadError("yt-dlp نصب نشده است.") from exc
 
+    url = _normalize_media_url(url)
     dest_dir.mkdir(parents=True, exist_ok=True)
     outtmpl = str(dest_dir / "%(title).200B [%(id)s].%(ext)s")
 
     postprocessors: list[dict] = []
+    format_selector = format_selector_for(url, preferred_format)
     if preferred_format == "audio":
-        format_selector = "bestaudio/best"
         postprocessors = [
             {
                 "key": "FFmpegExtractAudio",
@@ -197,10 +321,6 @@ def download_ytdlp(
                 "preferredquality": "192",
             }
         ]
-    elif preferred_format in {"best", ""}:
-        format_selector = "b/bv*+ba/best"
-    else:
-        format_selector = f"{preferred_format}/b/best"
 
     def _hook(d: dict) -> None:
         if not progress_callback:
@@ -218,6 +338,7 @@ def download_ytdlp(
             progress_callback(99)
 
     ydl_opts = _base_ydl_opts(url)
+    ydl_opts.update(_download_speed_opts())
     ydl_opts.update(
         {
             "outtmpl": outtmpl,
@@ -227,10 +348,7 @@ def download_ytdlp(
             "restrictfilenames": True,
         }
     )
-    urls_to_try = [url]
-    fallback = _pornhub_fallback_url(url)
-    if fallback:
-        urls_to_try.append(fallback)
+    urls_to_try = _urls_to_try(url)
 
     last_exc: BaseException | None = None
     info = None

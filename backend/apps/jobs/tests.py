@@ -56,6 +56,25 @@ class JobsApiTests(TestCase):
         self.assertEqual(detail.json()["telegram_user_id"], 42)
 
     @patch("apps.jobs.views.process_download_job.delay")
+    def test_create_job_accepts_ytdlp_format_id(self, delay_mock):
+        r = self.client.post(
+            "/api/v1/jobs/",
+            {
+                "url": "https://www.pornhub.com/view_video.php?viewkey=abc",
+                "telegram_user_id": 42,
+                "chat_id": 99,
+                "preferred_format": "hls-3116+bestaudio",
+            },
+            format="json",
+            **self.auth,
+        )
+        self.assertEqual(r.status_code, 201, r.content)
+        self.assertEqual(r.json()["preferred_format"], "hls-3116+bestaudio")
+        detail = self.client.get(f"/api/v1/jobs/{r.json()['id']}/", **self.auth)
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["preferred_format"], "hls-3116+bestaudio")
+
+    @patch("apps.jobs.views.process_download_job.delay")
     def test_direct_url_classified(self, delay_mock):
         r = self.client.post(
             "/api/v1/jobs/",

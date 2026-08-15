@@ -62,6 +62,8 @@ services:
       MEDIA_ROOT: /media
       YTDLP_COOKIES_FILE: ${YTDLP_COOKIES_FILE:-/cookies/cookies.json}
       YTDLP_PROXY: ${YTDLP_PROXY:-}
+      YTDLP_CONCURRENT_FRAGMENTS: ${YTDLP_CONCURRENT_FRAGMENTS:-16}
+      YTDLP_ARIA2_CONNECTIONS: ${YTDLP_ARIA2_CONNECTIONS:-16}
     volumes:
       - media_data:/media
       - ./cookies:/cookies:ro
@@ -89,6 +91,8 @@ services:
       MEDIA_ROOT: /media
       YTDLP_COOKIES_FILE: ${YTDLP_COOKIES_FILE:-/cookies/cookies.json}
       YTDLP_PROXY: ${YTDLP_PROXY:-}
+      YTDLP_CONCURRENT_FRAGMENTS: ${YTDLP_CONCURRENT_FRAGMENTS:-16}
+      YTDLP_ARIA2_CONNECTIONS: ${YTDLP_ARIA2_CONNECTIONS:-16}
     volumes:
       - media_data:/media
       - ./cookies:/cookies:ro

@@ -22,6 +22,7 @@ class TelegramUserSerializer(serializers.ModelSerializer):
 
 class DownloadJobSerializer(serializers.ModelSerializer):
     telegram_user_id = serializers.IntegerField(source="user.telegram_id", read_only=True)
+    preferred_format = serializers.CharField(max_length=64, required=False)
 
     class Meta:
         model = DownloadJob

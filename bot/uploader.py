@@ -29,7 +29,11 @@ async def upload_file_to_chat(
     text = caption or (title[:900] if title else path.name)
 
     if mime.startswith("video/") or path.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov"}:
-        await bot.send_video(chat_id=chat_id, video=input_file, caption=text)
+        try:
+            await bot.send_video(chat_id=chat_id, video=input_file, caption=text)
+        except Exception:  # noqa: BLE001
+            logger.warning("send_video failed; sending as document instead")
+            await bot.send_document(chat_id=chat_id, document=input_file, caption=text)
     elif mime.startswith("audio/") or path.suffix.lower() in {
         ".mp3",
         ".m4a",

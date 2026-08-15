@@ -102,3 +102,58 @@ class CompactFormatTests(SimpleTestCase):
         self.assertIn("best", ids)
         self.assertIn("audio", ids)
         self.assertTrue(all(r["id"] != "sb0" for r in rows))
+
+    def test_twitter_http_empty_codec_is_kept(self):
+        from apps.downloads.services.ytdlp import compact_format_choices
+
+        info = {
+            "formats": [
+                {
+                    "format_id": "http-2176",
+                    "height": 720,
+                    "vcodec": "",
+                    "acodec": "",
+                    "ext": "mp4",
+                    "protocol": "https",
+                    "filesize": 1288946799,
+                },
+                {
+                    "format_id": "hls-520",
+                    "height": 720,
+                    "vcodec": "avc1",
+                    "acodec": "none",
+                    "ext": "mp4",
+                    "protocol": "m3u8_native",
+                },
+            ]
+        }
+        rows = compact_format_choices(info)
+        by_720 = next(r for r in rows if r["height"] == 720)
+        self.assertEqual(by_720["id"], "http-2176")
+        self.assertIn("GB", by_720["label"])
+
+
+class FormatSelectorTests(SimpleTestCase):
+    def test_pornhub_best_prefers_progressive_http(self):
+        from apps.downloads.services.ytdlp import format_selector_for
+
+        sel = format_selector_for("https://www.pornhub.com/view_video.php?viewkey=abc", "best")
+        self.assertIn("protocol^=http", sel)
+
+    def test_twitter_best_prefers_progressive_http(self):
+        from apps.downloads.services.ytdlp import format_selector_for, _normalize_media_url
+
+        sel = format_selector_for("https://x.com/user/status/1", "best")
+        self.assertIn("protocol^=http", sel)
+        self.assertEqual(
+            _normalize_media_url("https://x.com/noisyb0y1/status/2087862674084258184/video/1"),
+            "https://x.com/noisyb0y1/status/2087862674084258184",
+        )
+
+    def test_youtube_best_stays_generic(self):
+        from apps.downloads.services.ytdlp import format_selector_for
+
+        self.assertEqual(
+            format_selector_for("https://www.youtube.com/watch?v=abc", "best"),
+            "b/bv*+ba/best",
+        )
