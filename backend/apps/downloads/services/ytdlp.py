@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 import mimetypes
+import re
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 
 from apps.downloads.services.base import (
     DownloadError,
@@ -12,6 +14,47 @@ from apps.downloads.services.base import (
 )
 
 logger = logging.getLogger(__name__)
+
+_BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+
+
+def _impersonate_target():
+    try:
+        from yt_dlp.networking.impersonate import ImpersonateTarget
+
+        return ImpersonateTarget.from_str("chrome")
+    except Exception:  # noqa: BLE001
+        return "chrome"
+
+
+def _pornhub_fallback_url(url: str) -> str | None:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if host in {"www.pornhub.com", "pornhub.com"}:
+        return urlunparse(parsed._replace(netloc="cn.pornhub.com"))
+    return None
+
+
+def _friendly_ytdlp_error(exc: BaseException) -> str:
+    text = str(exc)
+    lowered = text.lower()
+    if "410" in text or "gone" in lowered:
+        return (
+            "سایت ویدیو درخواست را مسدود کرد (HTTP 410). "
+            "معمولاً به‌خاطر تشخیص سرور/بات است، نه حذف شدن ویدیو. "
+            "اگر باز هم شکست خورد، لینک را در مرورگر چک کنید یا بعداً دوباره بفرستید."
+        )
+    if "403" in text or "412" in text:
+        return "سایت ویدیو دسترسی را بست. ممکن است محدودیت جغرافیایی یا ضدبات باشد."
+    if "sign in" in lowered or "login" in lowered or "age" in lowered:
+        return "این ویدیو نیاز به لاگین یا تأیید سن دارد و بدون کوکی قابل دانلود نیست."
+    # Strip noisy Python exception wrappers for Telegram
+    text = re.sub(r"\s*\(caused by <[^>]+>\)\s*", " ", text)
+    return f"خطا در دانلود: {text.strip()[:400]}"
 
 
 def download_ytdlp(
@@ -65,29 +108,63 @@ def download_ytdlp(
         "progress_hooks": [_hook],
         "postprocessors": postprocessors,
         "restrictfilenames": True,
-        "retries": 3,
+        "retries": 5,
+        "fragment_retries": 5,
         "socket_timeout": 30,
+        "impersonate": _impersonate_target(),
+        "http_headers": {
+            "User-Agent": _BROWSER_UA,
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": url,
+            "Cookie": "accessAgeDisclaimerPH=2",
+        },
+        # PornHub age gate; ignored by other extractors
+        "extractor_args": {
+            "generic": {"impersonate": ["chrome"]},
+        },
     }
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            if info is None:
-                raise DownloadError("اطلاعات ویدیو دریافت نشد.")
-            # After postprocessors, resolve final path
-            if "requested_downloads" in info and info["requested_downloads"]:
-                filepath = info["requested_downloads"][0].get("filepath")
-            else:
-                filepath = ydl.prepare_filename(info)
-                if preferred_format == "audio":
-                    filepath = str(Path(filepath).with_suffix(".mp3"))
+    urls_to_try = [url]
+    fallback = _pornhub_fallback_url(url)
+    if fallback:
+        urls_to_try.append(fallback)
 
-            title = info.get("title") or Path(filepath).stem
+    last_exc: BaseException | None = None
+    info = None
+    filepath = None
+    title = None
+    try:
+        for attempt_url in urls_to_try:
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(attempt_url, download=True)
+                    if info is None:
+                        raise DownloadError("اطلاعات ویدیو دریافت نشد.")
+                    if "requested_downloads" in info and info["requested_downloads"]:
+                        filepath = info["requested_downloads"][0].get("filepath")
+                    else:
+                        filepath = ydl.prepare_filename(info)
+                        if preferred_format == "audio":
+                            filepath = str(Path(filepath).with_suffix(".mp3"))
+                    title = info.get("title") or Path(filepath).stem
+                    last_exc = None
+                    break
+            except FileTooLargeError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                logger.warning("yt-dlp failed for %s: %s", attempt_url, exc)
+                continue
+        if last_exc is not None:
+            raise last_exc
+        if not filepath:
+            raise DownloadError("اطلاعات ویدیو دریافت نشد.")
+
     except FileTooLargeError:
         raise
     except Exception as exc:  # noqa: BLE001
         logger.exception("yt-dlp failed for %s", url)
-        raise DownloadError(f"خطا در yt-dlp: {exc}") from exc
+        raise DownloadError(_friendly_ytdlp_error(exc)) from exc
 
     path = Path(filepath)
     if not path.exists():

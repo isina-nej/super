@@ -22,6 +22,13 @@ YTDLP_HOST_HINTS = (
     "ok.ru",
     "dailymotion.com",
     "rumble.com",
+    "pornhub.com",
+    "pornhub.org",
+    "xvideos.com",
+    "xnxx.com",
+    "xhamster.com",
+    "redtube.com",
+    "youporn.com",
 )
 
 DIRECT_EXTENSIONS = (

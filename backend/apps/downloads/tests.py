@@ -30,3 +30,9 @@ class ClassifyUrlTests(SimpleTestCase):
             classify_url("https://www.tiktok.com/@user/video/123"),
             "ytdlp",
         )
+
+    def test_pornhub(self):
+        self.assertEqual(
+            classify_url("https://www.pornhub.com/view_video.php?viewkey=abc"),
+            "ytdlp",
+        )
