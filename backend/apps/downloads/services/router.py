@@ -41,17 +41,6 @@ def download_url(
             progress_callback=progress_callback,
         )
     except Exception as ytdlp_exc:
-        logger.warning(
-            "yt-dlp failed for %s (%s); trying direct download",
-            url,
-            ytdlp_exc,
-        )
-        try:
-            return download_direct(
-                url,
-                dest_dir,
-                max_bytes=max_bytes,
-                progress_callback=progress_callback,
-            )
-        except Exception:
-            raise ytdlp_exc from None
+        # HTML watch pages are not a valid fallback for extractor URLs.
+        logger.warning("yt-dlp failed for %s (%s)", url, ytdlp_exc)
+        raise

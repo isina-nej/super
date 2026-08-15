@@ -91,7 +91,7 @@ def download_ytdlp(
             }
         ]
     else:
-        format_selector = "bv*+ba/b"
+        format_selector = "b/bv*+ba/best"
         postprocessors = []
 
     def _hook(d: dict) -> None:
@@ -128,13 +128,22 @@ def download_ytdlp(
         # PornHub age gate; ignored by other extractors
         "extractor_args": {
             "generic": {"impersonate": ["chrome"]},
+            "youtube": {
+                "player_client": ["android", "web"],
+            },
         },
+        "js_runtimes": {"node": {}},
     }
 
     cookiefile = resolve_cookiefile()
-    if cookiefile:
+    host = (urlparse(url).hostname or "").lower()
+    youtube_host = "youtube.com" in host or host.endswith("youtu.be")
+    if cookiefile and not youtube_host:
         ydl_opts["cookiefile"] = cookiefile
         logger.info("yt-dlp using cookiefile")
+    elif youtube_host:
+        # Logged-in YouTube cookies often enable SABR-only streams with no URLs.
+        logger.info("skipping cookies for YouTube to avoid SABR-only formats")
     else:
         ydl_opts["http_headers"]["Cookie"] = "accessAgeDisclaimerPH=2"
 
