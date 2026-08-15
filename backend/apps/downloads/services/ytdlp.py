@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import mimetypes
+import os
 import re
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
@@ -12,6 +13,7 @@ from apps.downloads.services.base import (
     FileTooLargeError,
     ProgressCallback,
 )
+from apps.downloads.services.cookies import resolve_cookiefile
 
 logger = logging.getLogger(__name__)
 
@@ -48,10 +50,16 @@ def _friendly_ytdlp_error(exc: BaseException) -> str:
             "معمولاً به‌خاطر تشخیص سرور/بات است، نه حذف شدن ویدیو. "
             "اگر باز هم شکست خورد، لینک را در مرورگر چک کنید یا بعداً دوباره بفرستید."
         )
+    if "redirection detected" in lowered:
+        return (
+            "Pornhub از IP این سرور ویدیو را نشان نمی‌دهد (ریدایرکت به صفحه اصلی). "
+            "کوکی کمکی نکرد؛ معمولاً بلاک دیتاسنتر است. "
+            "برای این سایت باید پروکسی خانگی در YTDLP_PROXY بگذاری."
+        )
     if "403" in text or "412" in text:
         return "سایت ویدیو دسترسی را بست. ممکن است محدودیت جغرافیایی یا ضدبات باشد."
-    if "sign in" in lowered or "login" in lowered or "age" in lowered:
-        return "این ویدیو نیاز به لاگین یا تأیید سن دارد و بدون کوکی قابل دانلود نیست."
+    if "sign in" in lowered or "login required" in lowered or "age verification" in lowered or "age-gate" in lowered:
+        return "این ویدیو نیاز به لاگین یا تأیید سن دارد. کوکی مرورگر را در YTDLP_COOKIES_FILE بگذارید."
     # Strip noisy Python exception wrappers for Telegram
     text = re.sub(r"\s*\(caused by <[^>]+>\)\s*", " ", text)
     return f"خطا در دانلود: {text.strip()[:400]}"
@@ -116,13 +124,24 @@ def download_ytdlp(
             "User-Agent": _BROWSER_UA,
             "Accept-Language": "en-US,en;q=0.9",
             "Referer": url,
-            "Cookie": "accessAgeDisclaimerPH=2",
         },
         # PornHub age gate; ignored by other extractors
         "extractor_args": {
             "generic": {"impersonate": ["chrome"]},
         },
     }
+
+    cookiefile = resolve_cookiefile()
+    if cookiefile:
+        ydl_opts["cookiefile"] = cookiefile
+        logger.info("yt-dlp using cookiefile")
+    else:
+        ydl_opts["http_headers"]["Cookie"] = "accessAgeDisclaimerPH=2"
+
+    proxy = os.getenv("YTDLP_PROXY", "").strip()
+    if proxy:
+        ydl_opts["proxy"] = proxy
+        logger.info("yt-dlp using proxy")
 
     urls_to_try = [url]
     fallback = _pornhub_fallback_url(url)

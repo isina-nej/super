@@ -56,8 +56,11 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       MEDIA_ROOT: /media
+      YTDLP_COOKIES_FILE: ${YTDLP_COOKIES_FILE:-/cookies/cookies.json}
+      YTDLP_PROXY: ${YTDLP_PROXY:-}
     volumes:
       - media_data:/media
+      - ./cookies:/cookies:ro
     ports:
       - "${API_PUBLISH_PORT:-8000}:8000"
     depends_on:
@@ -80,8 +83,11 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       MEDIA_ROOT: /media
+      YTDLP_COOKIES_FILE: ${YTDLP_COOKIES_FILE:-/cookies/cookies.json}
+      YTDLP_PROXY: ${YTDLP_PROXY:-}
     volumes:
       - media_data:/media
+      - ./cookies:/cookies:ro
     command: ["celery", "-A", "config", "worker", "--loglevel=INFO", "--concurrency=2"]
     depends_on:
       mysql:

@@ -25,3 +25,7 @@ backend/staticfiles/
 
 # Docker
 mysql_data/
+
+# Browser cookies for yt-dlp (never commit)
+cookies/*
+!cookies/.gitkeep
