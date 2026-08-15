@@ -1,0 +1,10 @@
+.git
+.venv
+.pydeps
+__pycache__
+*.pyc
+.env
+media/jobs
+*.md
+.pytest_cache
+backend/staticfiles

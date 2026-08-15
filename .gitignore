@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pydeps/
+.env
+
+# Media / local data
+media/jobs/
+*.mp4
+*.mkv
+*.webm
+*.mp3
+
+# Django
+backend/staticfiles/
+*.sqlite3
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Docker
+mysql_data/
