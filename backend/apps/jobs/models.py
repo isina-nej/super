@@ -50,6 +50,12 @@ class DownloadJob(models.Model):
     file_size = models.BigIntegerField(null=True, blank=True)
     mime_type = models.CharField(max_length=255, blank=True, default="")
     title = models.CharField(max_length=512, blank=True, default="")
+    thumbnail_path = models.CharField(max_length=1024, blank=True, default="")
+    width = models.PositiveIntegerField(null=True, blank=True)
+    height = models.PositiveIntegerField(null=True, blank=True)
+    duration = models.PositiveIntegerField(null=True, blank=True, help_text="seconds")
+    clip_start_ms = models.PositiveIntegerField(null=True, blank=True)
+    clip_end_ms = models.PositiveIntegerField(null=True, blank=True)
     error = models.TextField(blank=True, default="")
     progress = models.PositiveSmallIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -69,6 +75,10 @@ class DownloadJob(models.Model):
     @property
     def is_active(self) -> bool:
         return self.status in {self.Status.PENDING, self.Status.DOWNLOADING}
+
+    @property
+    def is_clip(self) -> bool:
+        return self.clip_start_ms is not None and self.clip_end_ms is not None
 
     def mark_failed(self, message: str) -> None:
         self.status = self.Status.FAILED

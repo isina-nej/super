@@ -17,6 +17,10 @@ class DownloadResult:
     title: str = ""
     mime_type: str = ""
     file_size: int = 0
+    thumbnail_path: str = ""
+    width: int = 0
+    height: int = 0
+    duration: int = 0
 
 
 class DownloadError(Exception):

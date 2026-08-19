@@ -104,7 +104,7 @@ class JobsApiTests(TestCase):
         )
         self.assertEqual(r.status_code, 403)
 
-    @patch("apps.downloads.cleanup.cleanup_job_file")
+    @patch("apps.downloads.cleanup.cleanup_job_files")
     def test_ack_ready_job(self, cleanup_mock):
         user = TelegramUser.objects.create(telegram_id=55)
         job = DownloadJob.objects.create(
@@ -114,12 +114,14 @@ class JobsApiTests(TestCase):
             status=DownloadJob.Status.READY,
             source_type="direct",
             file_path="/media/jobs/1/a.mp4",
+            thumbnail_path="/media/jobs/1/thumbnail.jpg",
         )
         r = self.client.post(f"/api/v1/jobs/{job.id}/ack/", **self.auth)
         self.assertEqual(r.status_code, 200)
         job.refresh_from_db()
         self.assertEqual(job.status, DownloadJob.Status.ACKED)
-        cleanup_mock.assert_called_once()
+        self.assertEqual(job.thumbnail_path, "")
+        cleanup_mock.assert_called_once_with("/media/jobs/1/a.mp4", "/media/jobs/1/thumbnail.jpg")
 
     @patch("apps.jobs.views.process_download_job.delay")
     def test_cancel_pending_job(self, delay_mock):
@@ -144,6 +146,7 @@ class JobsApiTests(TestCase):
     def test_probe_ytdlp(self, probe_mock):
         probe_mock.return_value = {
             "title": "Demo",
+            "duration": 125,
             "formats": [{"id": "18", "label": "360p", "height": 360, "ext": "mp4"}],
         }
         r = self.client.post(
@@ -154,4 +157,58 @@ class JobsApiTests(TestCase):
         )
         self.assertEqual(r.status_code, 200, r.content)
         self.assertEqual(r.json()["title"], "Demo")
+        self.assertEqual(r.json()["duration"], 125)
         self.assertEqual(r.json()["formats"][0]["id"], "18")
+
+    @patch("apps.jobs.views.process_download_job.delay")
+    def test_create_job_with_clip_range(self, delay_mock):
+        r = self.client.post(
+            "/api/v1/jobs/",
+            {
+                "url": "https://www.youtube.com/watch?v=abc",
+                "telegram_user_id": 42,
+                "chat_id": 99,
+                "clip_start_ms": 1500,
+                "clip_end_ms": 5000,
+            },
+            format="json",
+            **self.auth,
+        )
+        self.assertEqual(r.status_code, 201, r.content)
+        data = r.json()
+        self.assertEqual(data["clip_start_ms"], 1500)
+        self.assertEqual(data["clip_end_ms"], 5000)
+
+        job = DownloadJob.objects.get(pk=data["id"])
+        self.assertTrue(job.is_clip)
+
+    @patch("apps.jobs.views.process_download_job.delay")
+    def test_create_job_clip_end_before_start_rejected(self, delay_mock):
+        r = self.client.post(
+            "/api/v1/jobs/",
+            {
+                "url": "https://www.youtube.com/watch?v=abc",
+                "telegram_user_id": 42,
+                "chat_id": 99,
+                "clip_start_ms": 5000,
+                "clip_end_ms": 5000,
+            },
+            format="json",
+            **self.auth,
+        )
+        self.assertEqual(r.status_code, 400)
+
+    @patch("apps.jobs.views.process_download_job.delay")
+    def test_create_job_clip_requires_both_bounds(self, delay_mock):
+        r = self.client.post(
+            "/api/v1/jobs/",
+            {
+                "url": "https://www.youtube.com/watch?v=abc",
+                "telegram_user_id": 42,
+                "chat_id": 99,
+                "clip_start_ms": 1000,
+            },
+            format="json",
+            **self.auth,
+        )
+        self.assertEqual(r.status_code, 400)

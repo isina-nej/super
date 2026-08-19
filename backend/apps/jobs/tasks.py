@@ -55,6 +55,10 @@ def process_download_job(self, job_id: int) -> dict:
         )
         job.progress = percent
 
+    clip_range_ms = None
+    if job.clip_start_ms is not None and job.clip_end_ms is not None:
+        clip_range_ms = (job.clip_start_ms, job.clip_end_ms)
+
     try:
         result = download_url(
             url=job.url,
@@ -63,6 +67,7 @@ def process_download_job(self, job_id: int) -> dict:
             preferred_format=job.preferred_format,
             max_bytes=settings.MAX_FILE_SIZE_BYTES,
             progress_callback=on_progress,
+            clip_range_ms=clip_range_ms,
         )
     except CancelledDownload:
         import shutil
@@ -114,6 +119,10 @@ def process_download_job(self, job_id: int) -> dict:
     job.mime_type = result.mime_type or ""
     job.title = (result.title or "")[:512]
     job.source_type = result.source_type
+    job.thumbnail_path = result.thumbnail_path or ""
+    job.width = result.width or None
+    job.height = result.height or None
+    job.duration = result.duration or None
     job.progress = 100
     job.completed_at = timezone.now()
     job.error = ""
@@ -125,6 +134,10 @@ def process_download_job(self, job_id: int) -> dict:
             "mime_type",
             "title",
             "source_type",
+            "thumbnail_path",
+            "width",
+            "height",
+            "duration",
             "progress",
             "completed_at",
             "error",

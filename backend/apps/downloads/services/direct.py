@@ -9,12 +9,12 @@ from urllib.parse import unquote, urlparse
 import httpx
 
 from apps.downloads.services.base import (
-    CancelledDownload,
     DownloadError,
     DownloadResult,
     FileTooLargeError,
     ProgressCallback,
 )
+from apps.downloads.services.media import trim_media_file
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,7 @@ def download_direct(
     max_bytes: int,
     progress_callback: ProgressCallback = None,
     timeout: float = 600.0,
+    clip_range_ms: tuple[int, int] | None = None,
 ) -> DownloadResult:
     dest_dir.mkdir(parents=True, exist_ok=True)
 
@@ -84,6 +85,10 @@ def download_direct(
                         progress_callback(min(99, int(written * 100 / int(content_length))))
                     else:
                         progress_callback(1)
+
+    if clip_range_ms:
+        start_ms, end_ms = clip_range_ms
+        dest = trim_media_file(dest, start_ms, end_ms)
 
     if progress_callback:
         progress_callback(100)

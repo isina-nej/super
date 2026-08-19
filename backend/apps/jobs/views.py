@@ -81,6 +81,8 @@ class JobListCreateView(APIView):
             preferred_format=data.get("preferred_format") or DownloadJob.PreferredFormat.BEST,
             source_type=source_type,
             status=DownloadJob.Status.PENDING,
+            clip_start_ms=data.get("clip_start_ms"),
+            clip_end_ms=data.get("clip_end_ms"),
         )
         async_result = process_download_job.delay(job.id)
         job.celery_task_id = str(getattr(async_result, "id", "") or "")[:255]
@@ -110,13 +112,16 @@ class JobAckView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        from apps.downloads.cleanup import cleanup_job_file
+        from apps.downloads.cleanup import cleanup_job_files
 
-        cleanup_job_file(job.file_path)
+        cleanup_job_files(job.file_path, job.thumbnail_path)
         job.status = DownloadJob.Status.ACKED
         job.file_path = ""
+        job.thumbnail_path = ""
         job.completed_at = timezone.now()
-        job.save(update_fields=["status", "file_path", "completed_at", "updated_at"])
+        job.save(
+            update_fields=["status", "file_path", "thumbnail_path", "completed_at", "updated_at"]
+        )
         return Response(DownloadJobSerializer(job).data)
 
 
@@ -145,9 +150,9 @@ class JobCancelView(APIView):
             except Exception:  # noqa: BLE001
                 pass
 
-        from apps.downloads.cleanup import cleanup_job_file
+        from apps.downloads.cleanup import cleanup_job_files
 
-        cleanup_job_file(job.file_path)
+        cleanup_job_files(job.file_path, job.thumbnail_path)
         return Response(DownloadJobSerializer(job).data)
 
 
@@ -171,6 +176,7 @@ class ProbeView(APIView):
                     "url": url,
                     "source_type": "direct",
                     "title": "",
+                    "duration": 0,
                     "formats": [
                         {"id": "best", "label": "دانلود فایل", "height": 0, "ext": ""},
                     ],
@@ -185,6 +191,7 @@ class ProbeView(APIView):
                 "url": url,
                 "source_type": "ytdlp",
                 "title": probed.get("title") or "",
+                "duration": probed.get("duration") or 0,
                 "formats": probed.get("formats") or [],
             }
         )

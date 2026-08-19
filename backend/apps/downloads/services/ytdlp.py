@@ -291,6 +291,7 @@ def list_ytdlp_formats(url: str) -> dict:
     return {
         "title": str(info.get("title") or "")[:512],
         "formats": compact_format_choices(info),
+        "duration": int(info.get("duration") or 0),
     }
 
 
@@ -301,9 +302,11 @@ def download_ytdlp(
     preferred_format: str = "best",
     max_bytes: int,
     progress_callback: ProgressCallback = None,
+    clip_range_ms: tuple[int, int] | None = None,
 ) -> DownloadResult:
     try:
         import yt_dlp
+        from yt_dlp.utils import download_range_func
     except ImportError as exc:
         raise DownloadError("yt-dlp نصب نشده است.") from exc
 
@@ -348,6 +351,13 @@ def download_ytdlp(
             "restrictfilenames": True,
         }
     )
+    if clip_range_ms:
+        start_s = max(0, clip_range_ms[0]) / 1000
+        end_s = max(0, clip_range_ms[1]) / 1000
+        ydl_opts["download_ranges"] = download_range_func(None, [(start_s, end_s)])
+        # Re-encodes a tiny bit around the cut points so the clip starts/ends
+        # precisely instead of snapping to the nearest keyframe.
+        ydl_opts["force_keyframes_at_cuts"] = True
     urls_to_try = _urls_to_try(url)
 
     last_exc: BaseException | None = None
