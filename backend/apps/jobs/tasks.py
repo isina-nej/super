@@ -36,11 +36,12 @@ def process_download_job(self, job_id: int) -> dict:
         job.status = DownloadJob.Status.DOWNLOADING
         job.progress = 1
     else:
+        # Someone else (a prior attempt, or a redelivered task) already
+        # claimed this job — don't run a second concurrent download for it.
         job.refresh_from_db()
         if job.status == DownloadJob.Status.CANCELED:
             return {"ok": False, "error": "canceled"}
-        if job.status != DownloadJob.Status.DOWNLOADING:
-            return {"ok": False, "error": f"invalid_status:{job.status}"}
+        return {"ok": False, "error": f"already_claimed:{job.status}"}
 
     def on_progress(percent: int) -> None:
         if DownloadJob.objects.filter(pk=job.id, status=DownloadJob.Status.CANCELED).exists():
@@ -75,13 +76,14 @@ def process_download_job(self, job_id: int) -> dict:
         )
         return {"ok": False, "error": "canceled"}
     except Exception as exc:  # noqa: BLE001 — surface to job.error
+        import shutil
+
         job.refresh_from_db()
         if job.status == DownloadJob.Status.CANCELED:
-            import shutil
-
             shutil.rmtree(dest_dir, ignore_errors=True)
             return {"ok": False, "error": "canceled"}
         logger.exception("Download failed for job %s", job_id)
+        shutil.rmtree(dest_dir, ignore_errors=True)
         job.mark_failed(str(exc) or "دانلود ناموفق بود.")
         return {"ok": False, "error": str(exc)}
 
