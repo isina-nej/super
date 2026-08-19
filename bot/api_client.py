@@ -46,6 +46,8 @@ class DjangoApiClient:
         first_name: str = "",
         last_name: str = "",
         language_code: str = "",
+        clip_start_ms: int | None = None,
+        clip_end_ms: int | None = None,
     ) -> dict[str, Any]:
         payload = {
             "url": url,
@@ -57,6 +59,9 @@ class DjangoApiClient:
             "last_name": last_name,
             "language_code": language_code,
         }
+        if clip_start_ms is not None and clip_end_ms is not None:
+            payload["clip_start_ms"] = clip_start_ms
+            payload["clip_end_ms"] = clip_end_ms
         r = await self._client.post(f"{self.base_url}/jobs/", json=payload)
         if r.status_code >= 400:
             detail = _extract_detail(r)

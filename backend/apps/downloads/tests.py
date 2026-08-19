@@ -1,7 +1,20 @@
+import json
+import subprocess
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
+
 from django.test import SimpleTestCase
 
+from apps.downloads.services.base import DownloadError
 from apps.downloads.services.classify import classify_url
 from apps.downloads.services.cookies import json_cookies_to_netscape
+from apps.downloads.services.media import (
+    ensure_faststart,
+    is_video_file,
+    probe_media,
+    trim_media_file,
+)
 
 
 class ClassifyUrlTests(SimpleTestCase):
@@ -157,3 +170,99 @@ class FormatSelectorTests(SimpleTestCase):
             format_selector_for("https://www.youtube.com/watch?v=abc", "best"),
             "b/bv*+ba/best",
         )
+
+
+class IsVideoFileTests(SimpleTestCase):
+    def test_by_mime_type(self):
+        self.assertTrue(is_video_file(Path("a.bin"), "video/mp4"))
+
+    def test_by_extension(self):
+        self.assertTrue(is_video_file(Path("a.mkv")))
+        self.assertFalse(is_video_file(Path("a.jpg")))
+        self.assertFalse(is_video_file(Path("a.zip")))
+
+
+class EnsureFaststartTests(SimpleTestCase):
+    def test_skips_non_mp4_containers(self):
+        with patch("apps.downloads.services.media.subprocess.run") as run_mock:
+            result = ensure_faststart(Path("clip.webm"))
+        run_mock.assert_not_called()
+        self.assertEqual(result, Path("clip.webm"))
+
+    def test_replaces_original_on_success(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            src = Path(tmp_dir) / "video.mp4"
+            src.write_bytes(b"original")
+
+            def fake_run(cmd, **kwargs):
+                Path(cmd[-1]).write_bytes(b"remuxed")
+                return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+            with patch("apps.downloads.services.media.subprocess.run", side_effect=fake_run):
+                result = ensure_faststart(src)
+
+            self.assertEqual(result, src)
+            self.assertEqual(src.read_bytes(), b"remuxed")
+            # temp remux file should not linger next to the original
+            self.assertEqual(list(Path(tmp_dir).iterdir()), [src])
+
+    def test_falls_back_to_original_on_ffmpeg_failure(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            src = Path(tmp_dir) / "video.mp4"
+            src.write_bytes(b"original")
+            failed = subprocess.CompletedProcess([], 1, b"", b"boom")
+
+            with patch("apps.downloads.services.media.subprocess.run", return_value=failed):
+                result = ensure_faststart(src)
+
+            self.assertEqual(result, src)
+            self.assertEqual(src.read_bytes(), b"original")
+
+
+class ProbeMediaTests(SimpleTestCase):
+    def test_parses_ffprobe_json(self):
+        payload = json.dumps(
+            {
+                "streams": [{"width": 1280, "height": 720}],
+                "format": {"duration": "12.8"},
+            }
+        ).encode()
+        proc = subprocess.CompletedProcess([], 0, payload, b"")
+        with patch("apps.downloads.services.media.subprocess.run", return_value=proc):
+            info = probe_media(Path("whatever.mp4"))
+        self.assertEqual(info, {"width": 1280, "height": 720, "duration": 12})
+
+    def test_returns_empty_dict_on_crash(self):
+        with patch(
+            "apps.downloads.services.media.subprocess.run",
+            side_effect=OSError("no ffprobe"),
+        ):
+            info = probe_media(Path("whatever.mp4"))
+        self.assertEqual(info, {})
+
+
+class TrimMediaFileTests(SimpleTestCase):
+    def test_replaces_original_on_success(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            src = Path(tmp_dir) / "video.mp4"
+            src.write_bytes(b"full-video")
+
+            def fake_run(cmd, **kwargs):
+                Path(cmd[-1]).write_bytes(b"trimmed-clip")
+                return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+            with patch("apps.downloads.services.media.subprocess.run", side_effect=fake_run):
+                result = trim_media_file(src, 1000, 3000)
+
+            self.assertEqual(result, src)
+            self.assertEqual(src.read_bytes(), b"trimmed-clip")
+
+    def test_raises_download_error_on_failure(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            src = Path(tmp_dir) / "video.mp4"
+            src.write_bytes(b"full-video")
+            failed = subprocess.CompletedProcess([], 1, b"", b"nope")
+
+            with patch("apps.downloads.services.media.subprocess.run", return_value=failed):
+                with self.assertRaises(DownloadError):
+                    trim_media_file(src, 1000, 3000)
