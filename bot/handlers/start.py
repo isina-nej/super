@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from urllib.parse import urlparse
 
 from aiogram import Bot, F, Router
@@ -25,8 +26,16 @@ router = Router()
 
 URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 
-# (user_id, quality_message_id) -> {url, formats}
+# (user_id, quality_message_id) -> {url, formats, expires_at}
 _pending: dict[tuple[int, int], dict] = {}
+_PENDING_TTL_SECONDS = 15 * 60
+
+
+def _prune_pending() -> None:
+    now = time.monotonic()
+    expired = [key for key, val in _pending.items() if val["expires_at"] <= now]
+    for key in expired:
+        del _pending[key]
 
 
 def _is_allowed(user_id: int) -> bool:
@@ -217,7 +226,12 @@ async def on_text(message: Message, api: DjangoApiClient) -> None:
         head = f"{title}\n\n" if title else ""
         await wait.edit_text(f"{head}کیفیت را انتخاب کنید:")
 
-    _pending[(user.id, wait.message_id)] = {"url": url, "formats": formats}
+    _prune_pending()
+    _pending[(user.id, wait.message_id)] = {
+        "url": url,
+        "formats": formats,
+        "expires_at": time.monotonic() + _PENDING_TTL_SECONDS,
+    }
     try:
         await wait.edit_reply_markup(reply_markup=_quality_keyboard(formats, wait.message_id))
     except Exception:  # noqa: BLE001
@@ -275,6 +289,8 @@ async def on_quality(callback: CallbackQuery, api: DjangoApiClient) -> None:
         return
 
     pending = _pending.pop((callback.from_user.id, msg_id), None)
+    if pending and pending["expires_at"] <= time.monotonic():
+        pending = None
     if not pending:
         await callback.answer("این انتخاب منقضی شده؛ لینک را دوباره بفرستید.", show_alert=True)
         return

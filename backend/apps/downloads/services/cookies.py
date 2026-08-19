@@ -94,8 +94,18 @@ def resolve_cookiefile(raw_path: str | None = None) -> str | None:
         filters = tuple(x.strip().lower() for x in filters_env.split(",") if x.strip()) or _DEFAULT_DOMAIN_FILTERS
         netscape = json_cookies_to_netscape(data, domain_filters=filters)
         dest = Path(tempfile.gettempdir()) / "yt-dlp-cookies.netscape.txt"
-        dest.write_text(netscape, encoding="utf-8")
-        os.chmod(dest, 0o600)
+        # Write atomically: concurrent jobs may read this same fixed path
+        # while another job is regenerating it; a partial write would
+        # corrupt the cookie file mid-read.
+        fd, tmp_name = tempfile.mkstemp(dir=dest.parent, prefix=".yt-dlp-cookies-")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(netscape)
+            os.chmod(tmp_name, 0o600)
+            os.replace(tmp_name, dest)
+        finally:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
         return str(dest)
 
     return str(path)
